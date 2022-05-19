@@ -10,6 +10,7 @@ RMSPROP optimization np
 kaggle-style problem solving
 denoising auto encoders (image coloring or noise reduction)
 adversarial sampling as regularization
+fine-tuning models within bounded constraints
 
 multi-task learning
 video processing
