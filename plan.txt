@@ -1,0 +1,10 @@
+plan:
+neural network (numpy)
+momentum/nesterov momentum/minibatch sampling
+convolution
+np convolution
+video processing
+recommendation engines
+kaggle-style problem solving
+denoising auto encoders as regularizaiton
+adversarial sampling as regularization
