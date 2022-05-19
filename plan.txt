@@ -3,8 +3,19 @@ neural network (numpy)
 momentum/nesterov momentum/minibatch sampling
 convolution
 np convolution
-video processing
 recommendation engines
+rec engine deployment
+ADAM optimization np
+RMSPROP optimization np
 kaggle-style problem solving
-denoising auto encoders as regularizaiton
+denoising auto encoders (image coloring or noise reduction)
 adversarial sampling as regularization
+
+multi-task learning
+video processing
+
+RNNs/LSTMs in numpy (needs to be after multi-task learning)
+Transformers
+face detection (YOLO)
+
+Object tracking
