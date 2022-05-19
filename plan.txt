@@ -1,10 +1,10 @@
 plan:
 neural network (numpy)
 momentum/nesterov momentum/minibatch sampling
-convolution
+TF: convolution / residual connections / adding noise for regularization / image transformations / adversarial sampling
 np convolution
 recommendation engines
-rec engine deployment
+rec engine deployment (aritra)
 ADAM optimization np
 RMSPROP optimization np
 kaggle-style problem solving
