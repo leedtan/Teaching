@@ -3,6 +3,7 @@ neural network (numpy)
 momentum/nesterov momentum/minibatch sampling
 TF: convolution / residual connections / adding noise for regularization / image transformations / adversarial sampling
 np convolution
+numba convolution for efficiency
 recommendation engines
 rec engine deployment (aritra)
 ADAM optimization np
