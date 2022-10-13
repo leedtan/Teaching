@@ -5,7 +5,18 @@ TF: convolution / residual connections / adding noise for regularization / image
 np convolution
 numba convolution for efficiency
 recommendation engines
-rec engine deployment (aritra)
+
+Image processing:
+9/23 - Convnet to solve CIFAR-10
+9/30 - residual layers (https://static.packt-cdn.com/products/9781789538205/graphics/assets/665d6bce-6d79-4ee7-9fd3-7d647767a792.png), DAE (optionally a ladder network), adversarial sampling, etc
+
+leveraging pre-trained models (fine tuning, etc)
+implement attention transformers
+implement transformers in numpy (start)
+implement transformers in numpy (finish)
+
+
+rec engine deployment
 ADAM optimization np
 RMSPROP optimization np
 kaggle-style problem solving
