@@ -8,6 +8,15 @@ NUM_CLASSES = 10
 tfph = tf.compat.v1.placeholder
 tf.compat.v1.disable_eager_execution()
 
+# Tensorflow aggressively deprecated static support for layer_norm.
+# This was some online code I found for people to get their old layer_norm function.
+# I've never used this in tf2, but I assume it should be identical
+def layer_norm(input_tensor, name=None):
+    """Run layer normalization on the last dimension of the tensor."""
+    return tf.keras.layers.LayerNormalization(
+        name=name, axis=-1, epsilon=1e-12, dtype=tf.float32
+    )(input_tensor)
+
 
 class ResidualConv:
     def __init__(self, layer_sizes):
@@ -27,6 +36,70 @@ class ResidualConv:
                 x = tf.nn.leaky_relu(x)
             self.features.append(x)
         self.output = signal + x
+        return self.output
+
+
+def softmax(v, axes, mask=None):
+    #     softmax over multiple axes (over these axes, they all a probability distribution)
+    # handles masking for use in nlp transformers
+    if mask is not None:
+        v = v * mask
+    v_max = tf.reduce_max(v, axes, keepdims=True)
+    v_stable = v - v_max
+    v_exp = tf.exp(v_stable)
+    if mask is not None:
+        v_exp = v_exp * mask
+    v_exp_sum = tf.reduce_sum(v_exp, axes, keepdims=True)
+    return v_exp / v_exp_sum
+
+
+class Attention:
+    def __init__(self, size):
+        self.size = size
+        # self.conv_layers = [
+        #     partial(
+        #         tf.compat.v1.layers.conv2d, filters=size, kernel_size=3, padding="SAME"
+        #     )
+        #     for _ in range(3)
+        # ]
+
+    def forward(self, X, einsum=True, dbg=False):
+        # input shape: bs, h, w, ndim
+        self.X = X
+        # if conv layers defined in advance
+        # self.q, self.k, self.v = [tf.tanh(conv(self.X)) for conv in self.conv_layers]
+        # batch, queryy, queryx, keyy, keyx, embeddings
+        self.q, self.k, self.v = [
+            tf.tanh(
+                tf.compat.v1.layers.conv2d(
+                    self.X, filters=self.size, kernel_size=3, padding="SAME"
+                )
+            )
+            for _ in range(3)
+        ]
+        if not einsum or dbg:
+            self.q_expanded = tf.expand_dims(tf.expand_dims(self.q, 3), 3)
+            self.k_expanded = tf.expand_dims(tf.expand_dims(self.k, 1), 1)
+            self.v_expanded = tf.expand_dims(tf.expand_dims(self.v, 1), 1)
+        if einsum:
+            self.scale = tf.einsum("bhwz,bijz->bhwij", self.q, self.k)
+            # for testing comparison
+            if dbg:
+                self.scale2 = tf.reduce_sum(self.q_expanded * self.k_expanded, -1)
+        else:
+            self.scale = tf.reduce_sum(self.q_expanded * self.k_expanded, -1)
+        self.soft = softmax(self.scale, axes=[3, 4])
+        # shape: batch, queryy, queryx, keyy, keyx, embeddings
+        if einsum:
+            # batch, y, x,
+            self.a_compressed = tf.einsum("bhwij,bijz->bwhz", self.soft, self.v)
+            if dbg:
+                self.a2 = tf.expand_dims(self.soft, -1) * self.v_expanded
+                self.a_compressed2 = tf.reduce_sum(self.a2, [3, 4])
+        else:
+            self.a = tf.expand_dims(self.soft, -1) * self.v_expanded
+            self.a_compressed = tf.reduce_sum(self.a, [3, 4])
+        self.output = layer_norm(self.a_compressed + X)
         return self.output
 
 
