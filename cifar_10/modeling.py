@@ -54,25 +54,48 @@ def softmax(v, axes, mask=None):
 
 
 class Attention:
+    # image: https://lilianweng.github.io/posts/2018-06-24-attention/transformer.png
     def __init__(self, size):
         self.size = size
-        # self.conv_layers = [
-        #     partial(
-        #         tf.compat.v1.layers.conv2d, filters=size, kernel_size=3, padding="SAME"
-        #     )
-        #     for _ in range(3)
-        # ]
 
-    def forward(self, X, einsum=True, dbg=False):
+    def forward(self, X, einsum=True, dbg=False, ff_layer=True, create_pos_enc=False):
         # input shape: bs, h, w, ndim
         self.X = X
-        # if conv layers defined in advance
-        # self.q, self.k, self.v = [tf.tanh(conv(self.X)) for conv in self.conv_layers]
         # batch, queryy, queryx, keyy, keyx, embeddings
+        if create_pos_enc:
+            self.length = self.X.shape[1]
+            bs = tf.shape(self.X)[0]
+            self.posy = tf.reshape(
+                tf.range(tf.cast(self.length, tf.float32), dtype=tf.float32),
+                (1, 1, -1, 1),
+            )
+            self.posx = tf.reshape(
+                tf.range(tf.cast(self.length, tf.float32), dtype=tf.float32),
+                (1, -1, 1, 1),
+            )
+            self.frequency = tf.reshape(tf.range(1, 6, dtype=tf.float32), (1, 1, 1, -1))
+            self.input_sin_x = self.posx / self.frequency
+            self.input_sin_y = self.posy / self.frequency
+            self.pos_sin_x = tf.tile(tf.sin(self.input_sin_x), (bs, 1, self.length, 1))
+            self.pos_cos_x = tf.tile(tf.cos(self.input_sin_x), (bs, 1, self.length, 1))
+            self.pos_sin_y = tf.tile(tf.sin(self.input_sin_y), (bs, self.length, 1, 1))
+            self.pos_cos_y = tf.tile(tf.cos(self.input_sin_y), (bs, self.length, 1, 1))
+            input_signal = tf.concat(
+                (
+                    self.X,
+                    self.pos_sin_x,
+                    self.pos_cos_x,
+                    self.pos_sin_y,
+                    self.pos_cos_y,
+                ),
+                axis=-1,
+            )
+        else:
+            input_signal = X
         self.q, self.k, self.v = [
             tf.tanh(
                 tf.compat.v1.layers.conv2d(
-                    self.X, filters=self.size, kernel_size=3, padding="SAME"
+                    input_signal, filters=self.size, kernel_size=3, padding="SAME"
                 )
             )
             for _ in range(3)
@@ -99,7 +122,13 @@ class Attention:
         else:
             self.a = tf.expand_dims(self.soft, -1) * self.v_expanded
             self.a_compressed = tf.reduce_sum(self.a, [3, 4])
-        self.output = layer_norm(self.a_compressed + X)
+        self.e = layer_norm(self.a_compressed + X)
+        if ff_layer:
+            self.output = layer_norm(
+                tf.compat.v1.layers.dense(self.e, self.size) + self.e
+            )
+        else:
+            self.output = self.e
         return self.output
 
 
@@ -132,7 +161,7 @@ class Model:
         y_train_onehot=None,
         y_test=None,
     ):
-
+        self.has_attn = False
         self.x_test_norm = x_test_norm
         self.x_train_norm = x_train_norm
         self.y_test_onehot = y_test_onehot
@@ -144,13 +173,17 @@ class Model:
         self.layers = layers
         self.features = [self.xph]
         for i, layer in enumerate(layers):
-            features = layer.forward(self.features[-1])
+            if isinstance(layer, Attention) and not self.has_attn:
+                features = layer.forward(self.features[-1], create_pos_enc=True)
+                self.has_attn = True
+            else:
+                features = layer.forward(self.features[-1])
             features = tf.nn.leaky_relu(features)
             self.features.append(features)
             if len(layers) // 2 == i:
                 pivot_features = features
                 for j, extra_layer in enumerate(extra_loss_layers):
-                    pivot_feautres = layer.forward(pivot_features)
+                    pivot_feautres = extra_layer.forward(pivot_features)
                     pivot_feautres = tf.nn.leaky_relu(pivot_feautres)
                 pivot_feautres = tf.compat.v1.layers.flatten(pivot_feautres)
                 extra_pred = tf.compat.v1.layers.dense(pivot_feautres, NUM_CLASSES)
@@ -179,26 +212,7 @@ class Model:
 
     def train(self, steps=10000, batch_size=64):
         for step in range(steps):
-            samples = np.random.choice(self.x_train_norm.shape[0], batch_size)
-            x_sample = self.x_train_norm[samples]
-            if step % 3 == 0:
-                noise = np.random.randn(*self.x_train_norm[samples].shape) * 1e-2
-                x_trn = x_sample + noise
-            elif step % 3 == 1:
-                self.fd = {self.xph: x_sample, self.yph: self.y_train_onehot[samples]}
-                grad_x = self.sess.run(self.grad_x, self.fd)
-                x_trn = x_sample + (grad_x > 0) * 1e-2 - 1e-2 / 2
-            else:
-                self.fd = {self.xph: x_sample, self.yph: self.y_train_onehot[samples]}
-                grad_x = self.sess.run(self.grad_x, self.fd)
-                grad_x = np.sqrt(np.abs(grad_x)) * ((grad_x > 0) * 2 - 1)
-                norm = np.sqrt(
-                    np.sum(np.square(grad_x).reshape(-1, 32 * 32 * 3), axis=1)
-                )
-                distortion = grad_x / norm[:, None, None, None]
-                x_trn = x_sample + distortion
-
-            self.fd = {self.xph: x_trn, self.yph: self.y_train_onehot[samples]}
+            self.sample_data(step, batch_size)
             ls, _ = self.sess.run([self.loss, self.opt], self.fd)
             self.losses.append(ls)
             if step % 100 == 0:
@@ -208,3 +222,23 @@ class Model:
                 self.val_acc.append(acc)
                 self.val_losses.append(val_loss)
                 print(val_loss)
+
+    def sample_data(self, step, batch_size):
+        samples = np.random.choice(self.x_train_norm.shape[0], batch_size)
+        x_sample = self.x_train_norm[samples]
+        if step % 3 == 0:
+            noise = np.random.randn(*self.x_train_norm[samples].shape) * 1e-2
+            x_trn = x_sample + noise
+        elif step % 3 == 1:
+            self.fd = {self.xph: x_sample, self.yph: self.y_train_onehot[samples]}
+            grad_x = self.sess.run(self.grad_x, self.fd)
+            x_trn = x_sample + (grad_x > 0) * 1e-2 - 1e-2 / 2
+        else:
+            self.fd = {self.xph: x_sample, self.yph: self.y_train_onehot[samples]}
+            grad_x = self.sess.run(self.grad_x, self.fd)
+            grad_x = np.sqrt(np.abs(grad_x)) * ((grad_x > 0) * 2 - 1)
+            norm = np.sqrt(np.sum(np.square(grad_x).reshape(-1, 32 * 32 * 3), axis=1))
+            distortion = grad_x / norm[:, None, None, None]
+            x_trn = x_sample + distortion
+
+        self.fd = {self.xph: x_trn, self.yph: self.y_train_onehot[samples]}
