@@ -13,18 +13,13 @@ tf.compat.v1.disable_eager_execution()
 # I've never used this in tf2, but I assume it should be identical
 def layer_norm(input_tensor, name=None):
     """Run layer normalization on the last dimension of the tensor."""
-    return tf.keras.layers.LayerNormalization(
-        name=name, axis=-1, epsilon=1e-12, dtype=tf.float32
-    )(input_tensor)
+    return tf.keras.layers.LayerNormalization(name=name, axis=-1, epsilon=1e-12, dtype=tf.float32)(input_tensor)
 
 
 class ResidualConv:
     def __init__(self, layer_sizes):
         self.layers = [
-            partial(
-                tf.compat.v1.layers.conv2d, filters=size, kernel_size=3, padding="SAME"
-            )
-            for size in layer_sizes
+            partial(tf.compat.v1.layers.conv2d, filters=size, kernel_size=3, padding="SAME") for size in layer_sizes
         ]
 
     def forward(self, signal):
@@ -61,7 +56,7 @@ class Attention:
     def forward(self, X, einsum=True, dbg=False, ff_layer=True, create_pos_enc=False):
         # input shape: bs, h, w, ndim
         self.X = X
-        # batch, queryy, queryx, keyy, keyx, embeddings
+        # batch, queryy, queryx, keyy, keyx, filters
         if create_pos_enc:
             self.length = self.X.shape[1]
             bs = tf.shape(self.X)[0]
@@ -93,11 +88,7 @@ class Attention:
         else:
             input_signal = X
         self.q, self.k, self.v = [
-            tf.tanh(
-                tf.compat.v1.layers.conv2d(
-                    input_signal, filters=self.size, kernel_size=3, padding="SAME"
-                )
-            )
+            tf.tanh(tf.compat.v1.layers.conv2d(input_signal, filters=self.size, kernel_size=3, padding="SAME"))
             for _ in range(3)
         ]
         if not einsum or dbg:
@@ -112,10 +103,10 @@ class Attention:
         else:
             self.scale = tf.reduce_sum(self.q_expanded * self.k_expanded, -1)
         self.soft = softmax(self.scale, axes=[3, 4])
-        # shape: batch, queryy, queryx, keyy, keyx, embeddings
+        # shape: batch, queryy, queryx, keyy, keyx, filters
         if einsum:
             # batch, y, x,
-            self.a_compressed = tf.einsum("bhwij,bijz->bwhz", self.soft, self.v)
+            self.a_compressed = tf.einsum("bhwij,bijz->bhwz", self.soft, self.v)
             if dbg:
                 self.a2 = tf.expand_dims(self.soft, -1) * self.v_expanded
                 self.a_compressed2 = tf.reduce_sum(self.a2, [3, 4])
@@ -124,9 +115,86 @@ class Attention:
             self.a_compressed = tf.reduce_sum(self.a, [3, 4])
         self.e = layer_norm(self.a_compressed + X)
         if ff_layer:
-            self.output = layer_norm(
-                tf.compat.v1.layers.dense(self.e, self.size) + self.e
+            self.output = layer_norm(tf.compat.v1.layers.dense(self.e, self.size) + self.e)
+        else:
+            self.output = self.e
+        return self.output
+
+
+class MHA:
+    # image: https://lilianweng.github.io/posts/2018-06-24-attention/transformer.png
+    def __init__(self, size):
+        self.size = size
+
+    def forward(self, X, heads=13, einsum=True, dbg=True, ff_layer=True, create_pos_enc=False):
+        # input shape: bs, h, w, ndim
+        self.X = X
+        # batch, queryy, queryx, keyy, keyx, heads, filters
+        self.length = self.X.shape[1]
+        bs = tf.shape(self.X)[0]
+        if create_pos_enc:
+            self.posy = tf.reshape(
+                tf.range(tf.cast(self.length, tf.float32), dtype=tf.float32),
+                (1, 1, -1, 1),
             )
+            self.posx = tf.reshape(
+                tf.range(tf.cast(self.length, tf.float32), dtype=tf.float32),
+                (1, -1, 1, 1),
+            )
+            self.frequency = tf.reshape(tf.range(1, 6, dtype=tf.float32), (1, 1, 1, -1))
+            self.input_sin_x = self.posx / self.frequency
+            self.input_sin_y = self.posy / self.frequency
+            self.pos_sin_x = tf.tile(tf.sin(self.input_sin_x), (bs, 1, self.length, 1))
+            self.pos_cos_x = tf.tile(tf.cos(self.input_sin_x), (bs, 1, self.length, 1))
+            self.pos_sin_y = tf.tile(tf.sin(self.input_sin_y), (bs, self.length, 1, 1))
+            self.pos_cos_y = tf.tile(tf.cos(self.input_sin_y), (bs, self.length, 1, 1))
+            input_signal = tf.concat(
+                (
+                    self.X,
+                    self.pos_sin_x,
+                    self.pos_cos_x,
+                    self.pos_sin_y,
+                    self.pos_cos_y,
+                ),
+                axis=-1,
+            )
+        else:
+            input_signal = X
+        # batch, queryy, queryx, keyy, keyx, heads, filters
+        self.q, self.k, self.v = [
+            tf.tanh(tf.compat.v1.layers.conv2d(input_signal, filters=self.size * heads, kernel_size=3, padding="SAME"))
+            for _ in range(3)
+        ]
+        # batch, y, x, heads, filters
+        self.q, self.k, self.v = [tf.reshape(v, [-1, v.shape[1], v.shape[2], heads, self.size]) for v in [self.q, self.k, self.v]]
+        if not einsum or dbg:
+            self.q_expanded = tf.expand_dims(tf.expand_dims(self.q, 3), 3)
+            self.k_expanded = tf.expand_dims(tf.expand_dims(self.k, 1), 1)
+            self.v_expanded = tf.expand_dims(tf.expand_dims(self.v, 1), 1)
+        if einsum:
+            self.scale = tf.einsum("bhwaz,bijaz->bhwija", self.q, self.k)
+            # for testing comparison
+            if dbg:
+                self.scale2 = tf.reduce_sum(self.q_expanded * self.k_expanded, -1)
+        else:
+            self.scale = tf.reduce_sum(self.q_expanded * self.k_expanded, -1)
+        self.soft = softmax(self.scale, axes=[3, 4])
+        # shape: batch, queryy, queryx, keyy, keyx, heads, filters
+        if einsum:
+            # batch, y, x,
+            self.a_compressed = tf.einsum("bhwija,bijaz->bhwaz", self.soft, self.v)
+            if dbg:
+                self.a2 = tf.expand_dims(self.soft, -1) * self.v_expanded
+                self.a_compressed2 = tf.reduce_sum(self.a2, [3, 4])
+        else:
+            self.a = tf.expand_dims(self.soft, -1) * self.v_expanded
+            self.a_compressed = tf.reduce_sum(self.a, [3, 4])
+        # a_compressed: batch, queryy, queryx, heads, filters
+        self.heads_reshaped = tf.reshape(self.a_compressed, [-1, self.length, self.length, heads * self.size])
+        self.MHA_output = tf.compat.v1.layers.dense(self.heads_reshaped, self.size)
+        self.e = layer_norm(self.MHA_output + X)
+        if ff_layer:
+            self.output = layer_norm(tf.compat.v1.layers.dense(self.e, self.size) + self.e)
         else:
             self.output = self.e
         return self.output
@@ -187,9 +255,7 @@ class Model:
                     pivot_feautres = tf.nn.leaky_relu(pivot_feautres)
                 pivot_feautres = tf.compat.v1.layers.flatten(pivot_feautres)
                 extra_pred = tf.compat.v1.layers.dense(pivot_feautres, NUM_CLASSES)
-                self.extra_loss = tf.compat.v1.losses.softmax_cross_entropy(
-                    self.yph, extra_pred
-                )
+                self.extra_loss = tf.compat.v1.losses.softmax_cross_entropy(self.yph, extra_pred)
         features = tf.compat.v1.layers.flatten(features)
         features = tf.compat.v1.layers.dense(features, 64)
         features = tf.nn.leaky_relu(features)
